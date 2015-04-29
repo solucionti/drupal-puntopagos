@@ -1,0 +1,12 @@
+name = Punto Pago Test
+description = Tests the conection with Punto Pago
+dependencies[] = puntopago
+package = Punto Pago - Transbank
+core = 7.x
+
+; Information added by  packaging script on 2013-11-08
+version = "7.x-1.2"
+core = "7.x"
+project = "puntopago"
+datestamp = "1383920315"
+

@@ -1,0 +1,12 @@
+name = Punto Pago API
+description = This module enables the basic functions of integration with the payment method Punto Pago
+package = Punto Pago - Transbank
+core = 7.x
+configure = admin/config/puntopago
+
+; Information added by  packaging script on 2013-11-08
+version = "7.x-1.2"
+core = "7.x"
+project = "puntopago"
+datestamp = "1383920315"
+

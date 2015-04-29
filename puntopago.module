@@ -1,0 +1,878 @@
+<?php
+
+/**
+ * @file
+ * Punto Pago primary module file.
+ */
+/**
+ * Transaction accepted by Transbank's Punto Pago
+ */
+define("PUNTOPAGO_ACCEPTED", "ACEPTADO");
+
+
+/**
+ * Transaction with necessary information for Transbank's Punto Pago
+ */
+define("PUNTOPAGO_CORRECT", "CORRECTO");
+
+
+/**
+ * Transaction rejected by Transbank's Punto Pago
+ */
+define("PUNTOPAGO_REJECTED", "RECHAZADO");
+
+/**
+ * Implements of hook_permission().
+ */
+function puntopago_permission() {
+    return array(
+        'puntopago administer' => array(
+            'title'           => t('Punto Pago Administer'),
+            'restrict access' => TRUE,
+        ),
+    );
+}
+
+/**
+ * Implements of hook_menu().
+ */
+function puntopago_menu() {
+    $items['puntopago/close']        = array(
+        'title'           => 'Close',
+        'access callback' => 'puntopago_close_access',
+        'page callback'   => 'puntopago_close',
+        'type'            => MENU_CALLBACK,
+        'file'            => 'puntopago.pages.inc',
+    );
+    // Target of a successful transaction.
+    $items['puntopago/success']      = array(
+        'title'           => 'Order successful',
+        'page callback'   => 'puntopago_success',
+        'access callback' => TRUE,
+        'type'            => MENU_CALLBACK,
+        'file'            => 'puntopago.pages.inc',
+    );
+    // Target of a failed transaction.
+    $items['puntopago/failure']      = array(
+        'title'           => 'Order failed',
+        'page callback'   => 'puntopago_failure',
+        'access callback' => TRUE,
+        'type'            => MENU_CALLBACK,
+        'file'            => 'puntopago.pages.inc',
+    );
+    $items['admin/config/puntopago'] = array(
+        'title'            => 'Punto Pago',
+        'description'      => 'Settings related to payment method Punto Pago.',
+        'position'         => 'right',
+        'page callback'    => 'system_admin_menu_block_page',
+        'access arguments' => array('puntopago administer'),
+        'file'             => 'system.admin.inc',
+        'file path'        => drupal_get_path('module', 'system'),
+    );
+
+    $items['admin/config/puntopago/configure-basic'] = array(
+        'title'            => 'Basic Settings',
+        'description'      => 'Basics Configuration of Punto Pago',
+        'page callback'    => 'drupal_get_form',
+        'page arguments'   => array('puntopago_configuration'),
+        'access arguments' => array('puntopago administer'),
+        'file'             => 'puntopago.admin.inc',
+    );
+
+    $items['admin/config/puntopago/configure-kcc'] = array(
+        'title'            => 'KCC Settings',
+        'description'      => 'Settings parameter for KCC',
+        'page callback'    => 'drupal_get_form',
+        'page arguments'   => array('puntopago_configuration_kcc'),
+        'access arguments' => array('puntopago administer'),
+        'file'             => 'puntopago.admin.inc',
+    );
+    // Log.
+    $items['admin/reports/puntopago']              = array(
+        'title'            => 'Punto Pago Log',
+        'description'      => 'Shows transactions made by Transbank',
+        'page callback'    => 'puntopago_admin_log',
+        'access arguments' => array('puntopago administer'),
+        'file'             => 'puntopago.admin.inc',
+    );
+
+    $items['admin/reports/puntopago/transactions'] = array(
+        'title' => 'Punto Pago',
+        'type'  => MENU_DEFAULT_LOCAL_TASK,
+    );
+
+    $items['admin/reports/puntopago/debug'] = array(
+        'title'            => 'Punto Pago Debug',
+        'description'      => 'Debug de Punto Pago',
+        'page callback'    => 'puntopago_admin_debug',
+        'access arguments' => array('puntopago administer'),
+        'type'             => MENU_LOCAL_TASK,
+        'file'             => 'puntopago.admin.inc',
+    );
+
+    return $items;
+}
+
+/**
+ * Checks if the user has access to the closing page.
+ *
+ * When is redirected back from Punto Pago - tbk_bp_resultado.cgi.
+ *
+ * @return bool
+ *   True if puntopagos access is not enabled or the same server makes the request,
+ *   false otherwise.
+ */
+function puntopago_close_access() {
+    if (!variable_get('puntopago_active_access', FALSE)) {
+        return TRUE;
+    }
+    return ip_address() == $_SERVER['SERVER_ADDR'];
+}
+
+/**
+ * Helper function to add javascripts.
+ *
+ * @param string $currency
+ *   currency code to use on redirection to Punto Pago
+ */
+function puntopago_redirect_js($currency) {
+    $path      = drupal_get_path('module', 'puntopago');
+    $puntopago = array('actionForm' => puntopago_get_action_form($currency));
+
+    drupal_add_js($path . '/js/puntopago.js');
+    drupal_add_js(array('puntopago' => $puntopago), 'setting');
+}
+
+/**
+ * Contains basic information to perform the redirection to Punto Pago.
+ *
+ * @param array $params
+ *   Array of parameters that Punto Pago needs
+ * @param string $submit_value
+ *   Value for the button that triggers the request
+ * @param string $currency
+ *   String code for the currencies allowed by Punto Pago
+ *    - CLP
+ *    - USD
+ *
+ * @return array
+ *   Form data
+ */
+function puntopago_redirect_form($form, $form_state, $params, $submit_value, $currency = 'CLP') {
+    $currencies = puntopago_allowed_currencies();
+    if (!in_array($currency, $currencies)) {
+        $args = array(
+            '@currency' => $currency,
+        );
+        drupal_set_message(t('The @currency currency is not permitted', $args));
+        return $form;
+    }
+    $form['#action'] = puntopago_get_action_form($currency);
+
+    $form['#method'] = 'POST';
+    foreach ($params as $name => $value) {
+        $form[$name] = array('#type' => 'hidden', '#value' => $value);
+    }
+    $form['submit'] = array(
+        '#type'  => 'submit',
+        '#value' => $submit_value,
+    );
+
+    return $form;
+}
+
+/**
+ * Gives the url to the script tbk_bp_pago.cgi for the choosen currency.
+ *
+ * @param string $currency
+ *   String code for the currencies allowed by Punto Pago
+ *    - CLP
+ *    - USD
+ *
+ * @return string
+ *   String url
+ */
+function puntopago_get_action_form($currency) {
+    $puntopago_settings = puntopago_get_settings_kcc();
+    global $base_path;
+    return $base_path . $puntopago_settings[$currency]['puntopago_ROOT_CGI'] . '/tbk_bp_pago.cgi';
+}
+
+/**
+ * Prepares data for the form to redirect to puntopago.
+ *
+ * @param array $params
+ *   Array of parameters
+ *   - amount: Amount of money to pay
+ *   - order_number: order number
+ *   - currency: currency of amount
+ *   - commerce: Which commerce is been used
+ *   - session: user's session assigned by the system
+ *
+ * @return array
+ *   Array of parameters ready for Punto Pago's KCC scripts.
+ */
+function puntopago_get_params($params) {
+    $success = url('puntopago/success', array('absolute' => TRUE));
+    $failure = url('puntopago/failure', array('absolute' => TRUE));
+    $amount  = puntopago_amount($params['amount'], $params['currency']);
+    return array(
+        'TBK_TIPO_TRANSACCION' => 'TR_NORMAL',
+        'TBK_MONTO'            => $amount,
+        'TBK_ORDEN_COMPRA'     => $params['order_number'],
+        'TBK_ID_SESION'        => $params['commerce'] . ':' . $params['session'],
+        'TBK_URL_EXITO'        => $success,
+        'TBK_URL_FRACASO'      => $failure,
+    );
+}
+
+/**
+ * Prepares data required by transbank on success page and success email.
+ *
+ * @param array $order
+ *   It has the following keys:
+ *     - order_id: order id
+ *     - client_name: client name
+ *     - puntopago_transaction: puntopago transaction id
+ *     - products (optional): themed product list
+ */
+function puntopago_prepare_for_voucher($order) {
+    $puntopago = $order['puntopago_transaction'];
+
+    $payment_type  = puntopago_payment_type($puntopago->tbk_tipo_pago);
+    $quota_type    = $payment_type['quota_type'];
+    $number_quotas = $puntopago->tbk_nro_cuotas ? $puntopago->tbk_nro_cuotas : '00';
+    // USD currency has no quota system.
+    if ($puntopago->currency == 'USD') {
+        $quota_type    = $number_quotas = NULL;
+    }
+
+    $voucher = array(
+        'order_id'           => $order['order_id'],
+        'client_name'        => $order['client_name'],
+        'commerce_url'       => url('<front>', array('absolute' => TRUE)),
+        'card_number'        => 'XXXX-XXXX-XXXX-' . $puntopago->tbk_nro_final_tarjeta,
+        'authorization_code' => $puntopago->tbk_cod_autorizacion,
+        'transaction_type'   => t('Sales'),
+        'payment_type'       => $payment_type['payment_type'],
+        'quota_type'         => $quota_type,
+        'number_of_quotas'   => $number_quotas,
+        'transaction_date'   => format_date($puntopago->timestamp_transaction, 'short'),
+    );
+    if (isset($order['products'])) {
+        $voucher['products'] = $order['products'];
+    }
+
+
+    return $voucher;
+}
+
+/**
+ * Format the aount with 2 decimal, with no commas nor dots.
+ *
+ * @param numeric $amount
+ *   Real amount of the order. It can be float or integer.
+ *
+ * @param bool $with_format
+ *   Defines if the amount is returned with dots and commas or not. False by
+ *   default
+ *
+ * @return string
+ *   formated amount
+ */
+function puntopago_amount($amount, $currency, $with_format = FALSE) {
+    $amount_with_format = number_format($amount, 2);
+    $new_amount         = str_replace(",", "", $amount_with_format);
+
+    if ($currency == 'CLP') {
+        /*
+         * CLP currency does not allow decimals, however it is requiered to add 2
+         * digits to the amount. If it had the decimals, the amount shall be rounded
+         * because Punto Pago will do it later.
+         */
+        $new_amount         = round($new_amount);
+        $amount_with_format = number_format($new_amount, 2);
+        $new_amount         = str_replace(",", "", $amount_with_format);
+    }
+
+    if ($with_format) {
+        return number_format($new_amount, 2);
+    }
+
+    return str_replace(".", "", $new_amount);
+}
+
+/**
+ * Themes a title and a table with the necessary information.
+ *
+ * This is a standards from Punto Pago
+ *
+ * @param array $vars
+ *   variables for theme
+ *
+ * @return string
+ *   themed voucher
+ */
+function theme_puntopago_voucher($vars) {
+    $rows = array();
+
+    $labels = array(
+        'client_name'        => t("Customer Name"),
+        'commerce_url'       => t("Commerce's Url"),
+        'card_number'        => t("Card Number"),
+        'authorization_code' => t("Authorization Code"),
+        'order_id'           => t("Order"),
+        'transaction_type'   => t("Transaction Type"),
+        'number_of_quotas'   => t("Number of Quotas"),
+        'payment_type'       => t("Payment Type"),
+        'quota_type'         => t("Type of quotas"),
+        'transaction_date'   => t("Transaction date"),
+        'products'           => t("Products"),
+    );
+
+    foreach ($labels as $id => $label) {
+        if (isset($vars[$id])) {
+            $rows[] = array(puntopago_prepare_voucher_label($label), $vars[$id]);
+        }
+    }
+
+    $output = '<h2 class="title">' . t("Payment receipt") . '</h2>';
+    $output .= theme('table', array('rows' => $rows));
+    $refund = variable_get('puntopago_devolucion_url', '');
+    if ($refund != '') {
+        $output .= '<div class="adicional">';
+        $link_attr = array('attributes' => array('target' => '_blank'));
+        $params    = array('!here' => l(t("click here"), $refund, $link_attr));
+        $output .= t("More information about refund !here", $params);
+        $output .= '</div>';
+    }
+
+    return $output;
+}
+
+/**
+ * Makes a cell for theme_table.
+ *
+ * @see theme_table()
+ *
+ * @param string $label
+ *   name of the voucher field.
+ *
+ * @return array
+ *   Structure for one cell.
+ */
+function puntopago_prepare_voucher_label($label) {
+    return array(
+        'data'  => $label,
+        'class' => array('puntopago-voucher-label'),
+    );
+}
+
+/**
+ * Implements hook_theme().
+ */
+function puntopago_theme($existing, $type, $theme, $path) {
+    return array(
+        'puntopago_voucher' => array(
+            'variables' => array(
+                'order_id'           => NULL,
+                'client_name'        => NULL,
+                'products'           => NULL,
+                'commerce_url'       => NULL,
+                'credit_card'        => NULL,
+                'authorization_code' => NULL,
+                'transaction_type'   => t('Sales'),
+                'number_of_quotas'   => NULL,
+                'payment_type'       => NULL,
+                'quota_type'         => NULL,
+            ),
+        ),
+        'puntopago_failure' => array(
+            'variables' => array(
+                'order_id'          => NULL,
+                'redirection'       => '<front>',
+                'title_redirection' => t('Go to home page'),
+            ),
+            'template'  => 'puntopago-failure',
+            'path'      => $path . '/templates',
+        ),
+    );
+}
+
+/**
+ * Gets the absolute path to the document root.
+ *
+ * @return string
+ *   path to document root.
+ */
+function puntopago_document_root() {
+    $absolute_dir = dirname(__FILE__);
+    $relative_dir = drupal_get_path('module', 'puntopago');
+
+    $root_path = str_replace('\\', '/', substr($absolute_dir, 0, -1 * (1 + strlen($relative_dir))));
+    return $root_path;
+}
+
+/**
+ * Gets the settings for different currencies (those allowed).
+ *
+ * The allowed values are: CLP and USD.
+ *
+ * @return array
+ *   Configuration array for each currency on KCC.
+ */
+function puntopago_get_settings_kcc() {
+    $settings = array();
+
+    $settings = array(
+        'ENVIROMENT' => variable_get('puntopago_AMBIENTE'),
+        'KEY'        => variable_get('puntopago_KEY'),
+        'SECRET'     => variable_get('puntopago_SECRET'),
+    );
+
+    return $settings;
+    foreach (array('CLP', 'USD') as $currency) {
+        $settings[$currency]['puntopago_ROOT_CGI'] = variable_get('puntopago_ROOT_CGI_' . $currency, '');
+    }
+
+    return $settings;
+}
+
+/**
+ * Lists Punto Pago's enviroments.
+ *
+ * @return array
+ *   List of Punto Pago's service enviroments.
+ */
+function puntopago_get_environment() {
+    return array(
+        0 => array(
+            'name'      => t('Certification'),
+            'servertra' => 'https://sandbox.puntopagos.com'
+        ),
+        1 => array(
+            'name'      => t('Production'),
+            'servertra' => 'https://www.puntopagos.com'
+        ),
+    );
+}
+
+/**
+ * Given an order id, returns the transaction made.
+ *
+ * @param int $order_id
+ *   order identifier
+ * @param string $commerce
+ *   The commerce system
+ *
+ * @return mixed
+ *   If a Transaction exists for the order then returns an object with the
+ *   Transaction data. Otherwise it returns boolean false.
+ */
+function puntopago_get_transaction_by_order($order_id, $commerce) {
+    $tbk_orden_compra = $order_id;
+    return db_select('puntopago', 'w')
+                    ->fields('w')
+                    ->condition('tbk_orden_compra', $tbk_orden_compra)
+                    ->condition('tbk_id_session', $commerce . ':%', 'LIKE')
+                    ->orderBy('wid', 'DESC')
+                    ->execute()
+                    ->fetchObject();
+}
+
+/**
+ * Given an wid, returns the transaction.
+ *
+ * @param int $wid
+ *   A transaction identifier in puntopago
+ *
+ * @return mixed
+ *   Retorna un Objeto si existe la transacción o Falso.
+ */
+function puntopago_get_transaction($wid) {
+    return db_select('puntopago', 'w')
+                    ->fields('w')
+                    ->condition('wid', $wid)
+                    ->execute()
+                    ->fetchObject();
+}
+
+/**
+ * Returns all transactions made.
+ *
+ * @param bool $pager
+ *   TRUE if a pager will be used. False otherwise.
+ *
+ * @return array
+ *   an array of Transactions.
+ */
+function puntopago_get_all_puntopago_transaction($pager = FALSE) {
+    $query = db_select('puntopago', 'w')
+            ->fields('w')
+            ->orderBy('wid', 'DESC');
+    if ($pager) {
+        $query = $query->extend('PagerDefault')->limit(10);
+    }
+    $results      = $query->execute();
+    $transactions = array();
+    while ($result       = $results->fetchObject()) {
+        $transactions[] = (array) $result;
+    }
+
+    return $transactions;
+}
+
+/**
+ * Fetch all KCC's log data.
+ *
+ * @return string
+ *   HTML table
+ */
+function puntopago_get_log() {
+    $query   = db_select('puntopago_log', 'w')
+                    ->fields('w')
+                    ->orderBy('wlogid', 'DESC')
+                    ->extend('PagerDefault')->limit(10);
+    $results = $query->execute();
+    $rows    = array();
+    while ($result  = $results->fetchObject()) {
+        $rows[] = array(
+            $result->message,
+            format_date($result->time),
+        );
+    }
+    $output = theme('table', array('rows' => $rows));
+    $output .= theme('pager', array());
+
+    return $output;
+}
+
+/**
+ * Given a payment code returns the string that represents that code.
+ *
+ * @param string $payment_type_code
+ *   payment type code, used by Punto Pago.
+ * @param array $options
+ *   An associative array of additional options, with the following elements:
+ *   - 'langcode' (defaults to the current language): The language code to
+ *     translate to a language other than what is used to display the page.
+ *   - 'context' (defaults to the empty context): The context the source string
+ *     belongs to.
+ *
+ * @return string
+ *   Returns the equivalent text string.
+ */
+function puntopago_payment_type($payment_type_code, array $options = array()) {
+    $credit = t("Credit", array(), $options);
+    switch ($payment_type_code) {
+        case 'VN':
+            return array(
+                'payment_type' => $credit,
+                'quota_type'   => t("Without quotas", array(), $options),
+            );
+        case 'VC':
+            return array(
+                'payment_type' => $credit,
+                'quota_type'   => t("Quota normal", array(), $options),
+            );
+        case 'SI':
+            return array(
+                'payment_type' => $credit,
+                'quota_type'   => t("No Interest", array(), $options),
+            );
+        case 'S2':
+            return array(
+                'payment_type' => $credit,
+                'quota_type'   => t("No Interest", array(), $options),
+            );
+        case 'CI':
+            return array(
+                'payment_type' => $credit,
+                'quota_type'   => t("Commerce Quotas", array(), $options),
+            );
+        case 'VD':
+            return array(
+                'payment_type' => t("RedCompra", array(), $options),
+                'quota_type'   => t("Debit", array(), $options),
+            );
+        case '2':
+            return array(
+                'payment_type' => t("Tarjeta Presto", array(), $options),
+                'quota_type'   => t("Debit", array(), $options),
+            );
+        case '3':
+            return array(
+                'payment_type' => t("Webpay Transbank (tarjetas de crédito y débito)
+", array(), $options),
+                'quota_type'   => t("Debit", array(), $options),
+            );
+        case '4':
+            return array(
+                'payment_type' => t("Botón de Pago Banco de Chile", array(), $options),
+                'quota_type'   => t("Debit", array(), $options),
+            );
+        case '5':
+            return array(
+                'payment_type' => t("Botón de Pago BCI", array(), $options),
+                'quota_type'   => t("Debit", array(), $options),
+            );
+        case '6':
+            return array(
+                'payment_type' => t("Botón de Pago TBanc", array(), $options),
+                'quota_type'   => t("Debit", array(), $options),
+            );
+        case '6':
+            return array(
+                'payment_type' => t("Botón de Pago Banco Estado", array(), $options),
+                'quota_type'   => t("Debit", array(), $options),
+            );
+        case '7':
+            return array(
+                'payment_type' => t("Botón de Pago BBVA", array(), $options),
+                'quota_type'   => t("Debit", array(), $options),
+            );
+        case '16':
+            return array(
+                'payment_type' => t("Tarjeta Ripley", array(), $options),
+                'quota_type'   => t("Debit", array(), $options),
+            );
+        case '15':
+            return array(
+                'payment_type' => t("Paypal", array(), $options),
+                'quota_type'   => t("Debit", array(), $options),
+            );
+    }
+}
+
+/**
+ * Given an answer code, it returns the string that represents that code.
+ *
+ * @param int $cod
+ *   Punto Pago response code.
+ *
+ * @return string
+ *   Human readable name for the code.
+ */
+function puntopago_tbk_answer_definition($cod) {
+    switch ($cod) {
+        case '0':
+            return t('Transaction approved');
+
+        case '-1':
+            return t('Refusal of transaction');
+
+        case '-2':
+            return t('Retry the transaction');
+
+        case '-3':
+            return t('Error in transaction');
+
+        case '-4':
+            return t('Refusal of transaction');
+
+        case '-5':
+            return 'Rechazo por error de tasa';
+
+        case '-6':
+            return t('Exceeds maximum monthly quota');
+
+        case '-7':
+            return t('Exceeds daily limit per transaction.');
+
+        case '-8':
+            return t('Unauthorized item');
+    }
+}
+
+/**
+ * Given an answer code if the return code is error, it returns the string that represents that code.
+ *
+ * @param int $cod
+ *   Punto Pago response code.
+ *
+ * @return string
+ *   Human readable name for the code.
+ */
+function puntopago_tbk_answer_error_definition($cod) {
+    switch ($cod) {
+        case '1':
+            return t('Transaction declined');
+
+        case '2':
+            return t('Transaction cancelled');
+
+        case '6':
+            return t('Transaction incomplete');
+
+        case '7':
+            return t('Error funder');
+    }
+}
+
+/**
+ * Registers on the watchdog the transaction made on closing page.
+ *
+ * @param array $items
+ *   an array with text strings.
+ */
+function puntopago_save_log($items) {
+    if (!empty($items)) {
+        $log = theme('item_list', array('items' => $items));
+    } else {
+        $log = t('Error');
+    }
+    $values = array(
+        'message' => $log,
+        'time'    => time(),
+    );
+    db_insert('puntopago_log')
+            ->fields($values)
+            ->execute();
+}
+
+/**
+ * Helper function for allowed currencies.
+ *
+ * @return array
+ *   Array of allowed currencies
+ */
+function puntopago_allowed_currencies() {
+    return array(
+        'CLP',
+        'USD',
+    );
+}
+
+/**
+ * Debug function that retrieves all $_SERVER variables.
+ *
+ * This information is stored in the watchdog.
+ */
+function puntopago_debug_watchdog_server_variable() {
+    $items = array();
+    foreach ($_SERVER as $key => $value) {
+        $items[] = $key . '=' . $value;
+    }
+    $items[] = 'Request Uri=' . request_uri();
+    watchdog('PUNTOPAGO', theme('item_list', array('items' => $items)));
+}
+
+/**
+ * Validates if the currency is allowed.
+ *
+ * @param string $currency
+ *   Currency code
+ *
+ * @return bool
+ *   TRUE if it is allowed, FALSE otherwise
+ */
+function puntopago_validate_currency($currency) {
+    $puntopago_settings = puntopago_get_settings_kcc();
+
+    $curr_undef = !isset($puntopago_settings[$currency]['puntopago_ROOT_CGI']);
+    $curr_empty = TRUE;
+    if (!$curr_undef) {
+        $curr_empty = $puntopago_settings[$currency]['puntopago_ROOT_CGI'] == '';
+    }
+
+    if ($curr_undef || $curr_empty) {
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
+/**
+ * Crea la transaccion para después redireccionar a PuntoPagos donde se realizará la selección
+ * de el medio de pago
+ * @param sring $trx_id Id de la transaccion asignado por la aplicacion cliente
+ * @param sring $monto Monto del pago a cobrar a través de PuntoPagos
+ * @return array Respuesta
+ */
+function puntopago_CrearTransaccion($trx_id, $monto) {
+    $funcion      = 'transaccion/crear';
+    $monto_str    = number_format($monto, 2, '.', '');
+    $data         = '{"trx_id":"' . $trx_id . '","monto":"' . $monto_str . '"}';
+    $header_array = puntopago_TraerHeader($funcion, $trx_id, $monto_str);
+    return json_decode(puntopago_ExecuteCommand(PUNTOPAGOS_URL . '/' . $funcion, $header_array, $data));
+}
+
+/**
+ *  Crea la transaccion ya habiendo seleccionado un medio de pago en la aplicacion, haciendo
+ * la redireccion correspondiente al medio de pago elegido
+ * @param sring $trx_id Id de la transaccion asignado por la aplicacion cliente
+ * @param sring $medio_pago Medio de pago elegido por el usuario, segun codificacion disponible en la documentacion de PuntoPagos
+ * @param sring $monto Monto del pago a cobrar a través de PuntoPagos
+ * @return array Respuesta
+ */
+function puntopago_CrearTransaccionMP($trx_id, $medio_pago, $monto) {
+    $funcion      = 'transaccion/crear';
+    $monto_str    = number_format($monto, 2, '.', '');
+    $data         = '{"trx_id":"' . $trx_id . '","medio_pago":"' . $medio_pago . '","monto":"' . $monto_str . '"}';
+    $header_array = puntopago_TraerHeader($funcion, $trx_id, $monto_str);
+    return json_decode(puntopago_ExecuteCommand(PUNTOPAGOS_URL . '/' . $funcion, $header_array, $data));
+}
+
+/**
+ *  Metodo para consultar el estado de una transacción en particular
+ * la redireccion correspondiente al medio de pago elegido
+ * @param sring $token Token de la transaccion
+ * @param sring $trx_id Id de la transaccion asignado por la aplicacion cliente
+ * @param sring $monto Monto del pago de la transaccion a consultar
+ * @return array Respuesta
+ */
+function puntopago_ConsultarTransaccion($token, $trx_id, $monto) {
+    $funcion        = 'transaccion';
+    $header_funcion = 'transaccion/traer';
+    $monto_str      = number_format($monto, 2, '.', '');
+    $header_array   = puntopago_TraerHeaderConsulta($header_funcion, $token, $trx_id, $monto_str);
+    return json_decode(puntopago_ExecuteCommandGET(PUNTOPAGOS_URL . '/' . $funcion . '/' . $token, $header_array));
+}
+
+function puntopago_FirmarMensaje($str) {
+    $signature = base64_encode(hash_hmac('sha1', $str, PUNTOPAGOS_SECRET, true));
+    return "PP " . PUNTOPAGOS_KEY . ":" . $signature;
+}
+
+function puntopago_TraerHeader($funcion, $trx_id, $monto_str) {
+    $fecha        = date("D, d M Y H:i:s", time()) . " GMT";
+    $mensaje      = $funcion . "\n" . $trx_id . "\n" . $monto_str . "\n" . $fecha;
+    $firma        = puntopago_FirmarMensaje($mensaje);
+    $header_array = array('Accept: application/json',
+        "Content-Type: application/json; charset=utf-8",
+        'Accept-Charset: utf-8',
+        'Fecha: ' . $fecha,
+        'Autorizacion:' . $firma);
+    return $header_array;
+}
+
+function puntopago_TraerHeaderConsulta($funcion, $token, $trx_id, $monto_str) {
+    $fecha        = date("D, d M Y H:i:s", time()) . " GMT";
+    $mensaje      = $funcion . "\n" . $token . "\n" . $trx_id . "\n" . $monto_str . "\n" . $fecha;
+    $firma        = puntopago_FirmarMensaje($mensaje);
+    $header_array = array('Accept: application/json',
+        "Content-Type: application/json; charset=utf-8",
+        'Accept-Charset: utf-8',
+        'Fecha: ' . $fecha,
+        'Autorizacion:' . $firma);
+    return $header_array;
+}
+
+function puntopago_ExecuteCommand($url, $header_array, $data) {
+    $ch     = curl_init();
+    curl_setopt($ch, CURLOPT_HTTPHEADER, $header_array);
+    curl_setopt($ch, CURLOPT_URL, $url);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
+    curl_setopt($ch, CURLOPT_POST, 1);
+    curl_setopt($ch, CURLOPT_USERAGENT, 'PuntoPagos-curl');
+    curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
+    //execute post
+    $result = curl_exec($ch);
+    $error  = curl_error($ch);
+    curl_close($ch);
+    if ($result) {
+        return $result;
+    } else {
+        return $error;
+    }
+}
